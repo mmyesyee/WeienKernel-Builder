@@ -1,0 +1,105 @@
+name: Build Kernel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  Kernel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SWAP
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 16
+
+      - name: Install build dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            libssl-dev libelf-dev libdw-dev build-essential dwarves \
+            gcc-aarch64-linux-gnu linux-tools-common \
+            bc bison flex rsync cpio python3
+
+      - name: Clone Kernel Source
+        run: |
+          git clone https://github.com/TheWeienKernelProject/android_WeienKernel_oneplus_mt6878.git --depth=1 -b Test mt6878
+          git clone https://github.com/mmyesyee/android_WeienKernel_modules_and_devicetree_oneplus_mt6878 --depth=1 -b oneplus/mt6878_b_16.0_turbo_6x modules
+          cp -r ${GITHUB_WORKSPACE}/modules/vendor ${GITHUB_WORKSPACE}/
+          cp -r ${GITHUB_WORKSPACE}/modules/kernel ${GITHUB_WORKSPACE}/
+
+      - name: Download AOSP Clang
+        run: |
+          curl -LO https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android14-qpr3-release/clang-r487747c.tar.gz
+          mkdir -p toolchains/clang-r487747c
+          tar -xf "clang-r487747c.tar.gz" -C "toolchains/clang-r487747c"
+
+      - name: Build with build.sh
+        run: |
+          export PATH="${GITHUB_WORKSPACE}/toolchains/clang-r487747c/bin:$PATH"
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export LLVM=1
+          export LLVM_IAS=1
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export KBUILD_BUILD_USER="twkp"
+          export KBUILD_BUILD_HOST="liuweien339-sys"
+          export KCFLAGS="-Wno-error"
+          export KLEAF_SUPPRESS_BUILD_SH_DEPRECATION_WARNING=1
+
+          BUILD_SH="${GITHUB_WORKSPACE}/kernel/build/build.sh"
+
+          cd mt6878
+
+          if [ ! -f "build/build_utils.sh" ] && [ -f "${GITHUB_WORKSPACE}/kernel/build/build_utils.sh" ]; then
+            rm -rf build
+            ln -s ${GITHUB_WORKSPACE}/kernel/build build
+          fi
+
+          if [ -f "kernel_device_modules-6.1/build.config.mtk_kernel_device_modules" ]; then
+            export BUILD_CONFIG=kernel_device_modules-6.1/build.config.mtk_kernel_device_modules
+          elif [ -f "build.config.mtk_kernel_device_modules" ]; then
+            export BUILD_CONFIG=build.config.mtk_kernel_device_modules
+          else
+            echo "ERROR: 找不到 build.config"
+            find . -maxdepth 4 -name "build.config.mtk*" -type f 2>/dev/null
+            exit 1
+          fi
+
+          export OUT_DIR="$(pwd)/out"
+          export DIST_DIR="$(pwd)/dist"
+
+          bash "$BUILD_SH" 2>&1 | tee ${GITHUB_WORKSPACE}/build.log
+
+      - name: Make AnyKernel3
+        run: |
+          git clone https://github.com/liuweien339-sys/AnyKernel3.git ak3
+
+          if [ -f mt6878/out/arch/arm64/boot/Image ]; then
+            cp mt6878/out/arch/arm64/boot/Image ak3/
+          elif [ -f mt6878/arch/arm64/boot/Image ]; then
+            cp mt6878/arch/arm64/boot/Image ak3/
+          elif [ -f mt6878/dist/Image ]; then
+            cp mt6878/dist/Image ak3/
+          fi
+
+          cp build.log ak3/
+          cd ak3
+          zip -r9 ../kernel.zip * -x .git
+
+      - name: Upload Kernel
+        uses: actions/upload-artifact@v4
+        with:
+          name: Turbo6XKernel
+          path: ak3/*
+          if-no-files-found: warn
+          compression-level: 6
+
+      - name: Upload Build Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: BuildLog
+          path: build.log
+          if-no-files-found: warn
