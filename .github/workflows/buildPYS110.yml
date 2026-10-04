@@ -120,7 +120,7 @@ jobs:
           cd mt6878
           make -j$(nproc) modules 2>&1 | tee -a ${GITHUB_WORKSPACE}/build.log
 
-      - name: Build Vendor Modules (WLAN only)
+      - name: Build Vendor Modules (via build.sh)
         if: ${{ inputs.build_modules == true }}
         run: |
           export PATH="${GITHUB_WORKSPACE}/toolchains/clang-r487747c/bin:$PATH"
@@ -129,65 +129,47 @@ jobs:
           export LLVM=1
           export LLVM_IAS=1
           export CROSS_COMPILE=aarch64-linux-gnu-
-          # 两个都加，双保险关掉 -Werror
           export KCFLAGS="-Wno-error"
-          export KBUILD_CFLAGS="-Wno-error"
+          export KBUILD_BUILD_USER="twkp"
+          export KBUILD_BUILD_HOST="liuweien339-sys"
+          export KLEAF_SUPPRESS_BUILD_SH_DEPRECATION_WARNING=1
 
           cd mt6878
 
-          # 按依赖顺序，一个都不能少
-          WLAN_DEPS="
+          # 只编 WLAN 相关（跳过 GPS/FM/BT/GPU/mtkcam 会报错的）
+          export EXT_MODULES="
           ../vendor/mediatek/kernel_modules/connectivity/common
           ../vendor/mediatek/kernel_modules/connectivity/conninfra
           ../vendor/mediatek/kernel_modules/connectivity/conninfra_mt6653
           ../vendor/mediatek/kernel_modules/connectivity/connfem
+          ../vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m_mt6653
+          ../vendor/mediatek/kernel_modules/connectivity/wlan/adaptor/wlan_page_pool
           "
 
-          # 先编依赖
-          for d in $WLAN_DEPS; do
-            if [ -d "$d" ]; then
-              echo ""
-              echo "========================================================"
-              echo "=== Building: $d ==="
-              echo "========================================================"
+          # 跳过已经做过的步骤
+          export SKIP_MRPROPER=1
+          export SKIP_DEFCONFIG=1
+          export SKIP_CP_KERNEL_HDR=1
 
-              # 特殊处理 connfem：加 include 路径
-              if [[ "$d" == *connfem* ]]; then
-                make -j$(nproc) -C "$d" M="$d" KERNEL_SRC="$PWD" O="$PWD" \
-                     KCFLAGS="-Wno-error" \
-                     ccflags-y+="-I$PWD/../kernel_device_modules-6.1/include" \
-                     modules 2>&1 | tee -a ${GITHUB_WORKSPACE}/build.log
-              else
-                make -j$(nproc) -C "$d" M="$d" KERNEL_SRC="$PWD" O="$PWD" \
-                     KCFLAGS="-Wno-error" \
-                     modules 2>&1 | tee -a ${GITHUB_WORKSPACE}/build.log
-              fi
+          # 使用 MTK 的 build.config
+          export BUILD_CONFIG=kernel_device_modules-6.1/build.config.mtk_kernel_device_modules
 
-              if [ ! -f "$PWD/$d/Module.symvers" ]; then
-                echo "WARN: $d 没有生成 Module.symvers"
-              fi
-            fi
-          done
+          # 输出目录
+          export OUT_DIR="$(pwd)"
+          export DIST_DIR="$(pwd)/dist"
 
-          # 编 WLAN 主驱动
-          echo ""
-          echo "========================================================"
-          echo "=== Building WLAN core ==="
-          echo "========================================================"
-          cd ../vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m_mt6653
-          make -j$(nproc) -C "$OLDPWD" M="$PWD" KERNEL_SRC="$OLDPWD" O="$OLDPWD" \
-               KCFLAGS="-Wno-error" \
-               modules 2>&1 | tee -a ${GITHUB_WORKSPACE}/build.log
-          cd "$OLDPWD"
+          echo "=== 开始用 build.sh 编厂商模块 ==="
+          bash build/build.sh 2>&1 | tee -a ${GITHUB_WORKSPACE}/build.log || true
 
           echo ""
-          echo "=== 检查 WLAN ko 是否生成 ==="
-          find ../vendor/mediatek/kernel_modules/connectivity -name "*.ko" 2>/dev/null | head -20
+          echo "=== dist 里的 .ko ==="
+          find ${DIST_DIR} -name "*.ko" 2>/dev/null | head -40
 
       - name: Collect all modules
         if: ${{ inputs.build_modules == true }}
         run: |
           mkdir -p all_modules
+          # 收集所有 .ko（内核 + 厂商）
           find ${GITHUB_WORKSPACE}/mt6878 -name "*.ko" -type f 2>/dev/null | while read f; do
             rel="${f#${GITHUB_WORKSPACE}/mt6878/}"
             mkdir -p "all_modules/$(dirname "$rel")"
@@ -196,7 +178,7 @@ jobs:
 
           echo "=== 模块总数 ==="
           find all_modules -name "*.ko" | wc -l
-          echo "=== WLAN 相关 ==="
+          echo "=== WLAN / conn 相关 ==="
           find all_modules -name "*.ko" | grep -iE "wlan|conn|gen4m|wifi" | head -30
 
           cd all_modules
