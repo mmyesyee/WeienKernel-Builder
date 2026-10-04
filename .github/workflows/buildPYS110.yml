@@ -1,8 +1,13 @@
-name: Compile Kernel + All Vendor Modules
+name: Compile Kernel PYS110
 
 on:
   workflow_dispatch:
     inputs:
+      build_modules:
+        description: "编译内核模块（.ko）"
+        required: true
+        type: boolean
+        default: false
       susfs:
         description: "为本内核开启SuSFS支持"
         required: true
@@ -30,8 +35,13 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y \
-            libssl-dev libelf-dev libdw-dev build-essential dwarves \
-            gcc-aarch64-linux-gnu linux-tools-common \
+            libssl-dev \
+            libelf-dev \
+            libdw-dev \
+            build-essential \
+            dwarves \
+            gcc-aarch64-linux-gnu \
+            linux-tools-common \
             bc bison flex rsync cpio python3
 
       - name: Clone Kernel Source
@@ -74,7 +84,7 @@ jobs:
             cp susfs/kernel_patches/include/linux/* include/linux/
           fi
 
-      - name: Make Config & Build Kernel + All Modules
+      - name: Make Config & Build Kernel
         run: |
           export PATH="${GITHUB_WORKSPACE}/toolchains/clang-r487747c/bin:$PATH"
           export ARCH=arm64
@@ -94,10 +104,24 @@ jobs:
             echo "CONFIG_KSU_SUSFS=y" >> .config
           fi
 
-          # 编内核 Image + 内核内建 obj-m 模块（比如 net/wireless/*.ko）
-          make -j$(nproc) Image modules 2>&1 | tee ${GITHUB_WORKSPACE}/build.log
+          make -j$(nproc) Image 2>&1 | tee ${GITHUB_WORKSPACE}/build.log
 
-      - name: Build Vendor Modules (WLAN/conninfra/connfem/...)
+      - name: Build Kernel Tree Modules
+        if: ${{ inputs.build_modules == true }}
+        run: |
+          export PATH="${GITHUB_WORKSPACE}/toolchains/clang-r487747c/bin:$PATH"
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export LLVM=1
+          export LLVM_IAS=1
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export KCFLAGS="-Wno-error"
+
+          cd mt6878
+          make -j$(nproc) modules 2>&1 | tee -a ${GITHUB_WORKSPACE}/build.log
+
+      - name: Build Vendor Modules
+        if: ${{ inputs.build_modules == true }}
         run: |
           export PATH="${GITHUB_WORKSPACE}/toolchains/clang-r487747c/bin:$PATH"
           export ARCH=arm64
@@ -109,7 +133,6 @@ jobs:
 
           cd mt6878
 
-          # 从 build.config.mtk_kernel_device_modules 抄的 EXT_MODULES
           VENDOR_MODULES="
           kernel_device_modules-6.1
           ../vendor/mediatek/kernel_modules/connectivity/common
@@ -143,6 +166,7 @@ jobs:
           done
 
       - name: Collect all modules
+        if: ${{ inputs.build_modules == true }}
         run: |
           mkdir -p all_modules
           find ${GITHUB_WORKSPACE}/mt6878 -name "*.ko" -type f 2>/dev/null | while read f; do
@@ -154,7 +178,7 @@ jobs:
           echo "=== 模块总数 ==="
           find all_modules -name "*.ko" | wc -l
           echo "=== WLAN 相关 ==="
-          find all_modules -name "*.ko" | grep -iE "wlan|conn|gen4m" | head -20
+          find all_modules -name "*.ko" | grep -iE "wlan|conn|gen4m|wifi" | head -30
 
           cd all_modules
           tar -czf ${GITHUB_WORKSPACE}/kernel-modules.tar.gz .
@@ -179,6 +203,7 @@ jobs:
           compression-level: 6
 
       - name: Upload All Kernel Modules
+        if: ${{ inputs.build_modules == true }}
         uses: actions/upload-artifact@v4
         with:
           name: KernelModules
