@@ -1,13 +1,8 @@
-name: Compile Kernel PYS110
+name: Compile Kernel + All Vendor Modules
 
 on:
   workflow_dispatch:
     inputs:
-      build_modules:
-        description: "编译内核模块（.ko）"
-        required: true
-        type: boolean
-        default: false
       susfs:
         description: "为本内核开启SuSFS支持"
         required: true
@@ -35,13 +30,9 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y \
-            libssl-dev \
-            libelf-dev \
-            libdw-dev \
-            build-essential \
-            dwarves \
-            gcc-aarch64-linux-gnu \
-            linux-tools-common
+            libssl-dev libelf-dev libdw-dev build-essential dwarves \
+            gcc-aarch64-linux-gnu linux-tools-common \
+            bc bison flex rsync cpio python3
 
       - name: Clone Kernel Source
         run: |
@@ -83,7 +74,7 @@ jobs:
             cp susfs/kernel_patches/include/linux/* include/linux/
           fi
 
-      - name: Make Config & Build Kernel Image
+      - name: Make Config & Build Kernel + All Modules
         run: |
           export PATH="${GITHUB_WORKSPACE}/toolchains/clang-r487747c/bin:$PATH"
           export ARCH=arm64
@@ -103,10 +94,10 @@ jobs:
             echo "CONFIG_KSU_SUSFS=y" >> .config
           fi
 
-          make -j$(nproc) Image 2>&1 | tee ${GITHUB_WORKSPACE}/build.log
+          # 编内核 Image + 内核内建 obj-m 模块（比如 net/wireless/*.ko）
+          make -j$(nproc) Image modules 2>&1 | tee ${GITHUB_WORKSPACE}/build.log
 
-      - name: Build Kernel Modules
-        if: ${{ inputs.build_modules == true }}
+      - name: Build Vendor Modules (WLAN/conninfra/connfem/...)
         run: |
           export PATH="${GITHUB_WORKSPACE}/toolchains/clang-r487747c/bin:$PATH"
           export ARCH=arm64
@@ -114,15 +105,44 @@ jobs:
           export LLVM=1
           export LLVM_IAS=1
           export CROSS_COMPILE=aarch64-linux-gnu-
-          export KBUILD_BUILD_USER="twkp"
-          export KBUILD_BUILD_HOST="liuweien339-sys"
           export KCFLAGS="-Wno-error"
 
           cd mt6878
-          make -j$(nproc) modules 2>&1 | tee -a ${GITHUB_WORKSPACE}/build.log
+
+          # 从 build.config.mtk_kernel_device_modules 抄的 EXT_MODULES
+          VENDOR_MODULES="
+          kernel_device_modules-6.1
+          ../vendor/mediatek/kernel_modules/connectivity/common
+          ../vendor/mediatek/kernel_modules/connectivity/conninfra
+          ../vendor/mediatek/kernel_modules/connectivity/conninfra_mt6653
+          ../vendor/mediatek/kernel_modules/connectivity/connfem
+          ../vendor/mediatek/kernel_modules/connectivity/gps/gps_stp
+          ../vendor/mediatek/kernel_modules/connectivity/gps/data_link
+          ../vendor/mediatek/kernel_modules/connectivity/gps/gps_pwr
+          ../vendor/mediatek/kernel_modules/connectivity/gps/gps_scp
+          ../vendor/mediatek/kernel_modules/gpu
+          ../vendor/mediatek/kernel_modules/connectivity/fmradio
+          ../vendor/mediatek/kernel_modules/connectivity/wlan/adaptor
+          ../vendor/mediatek/kernel_modules/connectivity/wlan/adaptor_mt6653
+          ../vendor/mediatek/kernel_modules/connectivity/wlan/adaptor/wlan_page_pool
+          ../vendor/mediatek/kernel_modules/connectivity/bt/linux_v2
+          ../vendor/mediatek/kernel_modules/connectivity/bt/linux_v2_mt6653
+          ../vendor/mediatek/kernel_modules/hbt_driver_cus
+          ../vendor/mediatek/kernel_modules/mtkcam
+          ../vendor/tests/kernel/ktf_testcase
+          "
+
+          for d in $VENDOR_MODULES; do
+            if [ -d "$d" ]; then
+              echo "=== Building vendor module: $d ==="
+              make -j$(nproc) -C "$d" M="$d" KERNEL_SRC="$PWD" O="$PWD" modules \
+                  2>&1 | tail -20 | tee -a ${GITHUB_WORKSPACE}/build.log
+            else
+              echo "=== SKIP (not found): $d ==="
+            fi
+          done
 
       - name: Collect all modules
-        if: ${{ inputs.build_modules == true }}
         run: |
           mkdir -p all_modules
           find ${GITHUB_WORKSPACE}/mt6878 -name "*.ko" -type f 2>/dev/null | while read f; do
@@ -133,8 +153,8 @@ jobs:
 
           echo "=== 模块总数 ==="
           find all_modules -name "*.ko" | wc -l
-          echo "=== 模块列表（前 50 个）==="
-          find all_modules -name "*.ko" | head -50
+          echo "=== WLAN 相关 ==="
+          find all_modules -name "*.ko" | grep -iE "wlan|conn|gen4m" | head -20
 
           cd all_modules
           tar -czf ${GITHUB_WORKSPACE}/kernel-modules.tar.gz .
@@ -159,7 +179,6 @@ jobs:
           compression-level: 6
 
       - name: Upload All Kernel Modules
-        if: ${{ inputs.build_modules == true }}
         uses: actions/upload-artifact@v4
         with:
           name: KernelModules
